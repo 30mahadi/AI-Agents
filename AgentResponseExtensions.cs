@@ -1,207 +1,48 @@
 ﻿// Copyright (c) Microsoft. All rights reserved.
 
-using System;
-using System.Collections.Generic;
-using System.Linq;
-using System.Text.Json;
-using Microsoft.Agents.AI.Hosting.OpenAI.ChatCompletions.Models;
-using Microsoft.Extensions.AI;
+using System.Diagnostics.CodeAnalysis;
+using Microsoft.Agents.AI;
+using Microsoft.Shared.DiagnosticIds;
+using Microsoft.Shared.Diagnostics;
+using OpenAI.Chat;
+using OpenAI.Responses;
 
-namespace Microsoft.Agents.AI.Hosting.OpenAI.ChatCompletions;
+namespace Microsoft.Agents.AI;
 
 /// <summary>
-/// Extension methods for converting agent responses to ChatCompletion models.
+/// Provides extension methods for <see cref="AgentResponse"/> and <see cref="AgentResponseUpdate"/> instances to
+/// create or extract native OpenAI response objects from the Microsoft Agent Framework responses.
 /// </summary>
-internal static class AgentResponseExtensions
+[Experimental(DiagnosticIds.Experiments.AIOpenAIResponses)]
+public static class AgentResponseExtensions
 {
-    public static ChatCompletion ToChatCompletion(this AgentResponse agentResponse, CreateChatCompletion request)
+    /// <summary>
+    /// Creates or extracts a native OpenAI <see cref="ChatCompletion"/> object from an <see cref="AgentResponse"/>.
+    /// </summary>
+    /// <param name="response">The agent response.</param>
+    /// <returns>The OpenAI <see cref="ChatCompletion"/> object.</returns>
+    /// <exception cref="ArgumentNullException"><paramref name="response"/> is <see langword="null"/>.</exception>
+    public static ChatCompletion AsOpenAIChatCompletion(this AgentResponse response)
     {
-        IList<ChatCompletionChoice> choices = agentResponse.ToChoices();
+        Throw.IfNull(response);
 
-        return new ChatCompletion
-        {
-            Id = IdGenerator.NewId(prefix: "chatcmpl", delimiter: "-", stringLength: 13),
-            Choices = choices,
-            Created = (agentResponse.CreatedAt ?? DateTimeOffset.UtcNow).ToUnixTimeSeconds(),
-            Model = request.Model,
-            Usage = agentResponse.Usage.ToCompletionUsage(),
-            ServiceTier = request.ServiceTier ?? "default"
-        };
-    }
-
-    public static List<ChatCompletionChoice> ToChoices(this AgentResponse agentResponse)
-    {
-        var chatCompletionChoices = new List<ChatCompletionChoice>();
-        var index = 0;
-
-        var finishReason = agentResponse.FinishReason?.ToString() ?? ChatFinishReason.Stop.Value; // "stop" is a natural stop point; returning this by-default
-
-        foreach (var message in agentResponse.Messages)
-        {
-            foreach (var content in message.Contents)
-            {
-                ChoiceMessage? choiceMessage = content switch
-                {
-                    // text
-                    TextContent textContent => new()
-                    {
-                        Content = textContent.Text
-                    },
-
-                    // image, see how MessageContentPartConverter packs the content types
-                    DataContent imageContent when imageContent.HasTopLevelMediaType("image") => new()
-                    {
-                        Content = imageContent.Base64Data.ToString()
-                    },
-                    UriContent urlContent when urlContent.HasTopLevelMediaType("image") => new()
-                    {
-                        Content = urlContent.Uri.ToString()
-                    },
-
-                    // audio
-                    DataContent audioContent when audioContent.HasTopLevelMediaType("audio") => new()
-                    {
-                        Audio = new()
-                        {
-                            Data = audioContent.Base64Data.ToString(),
-                            Id = audioContent.Name,
-                            //Transcript = ,
-                            //ExpiresAt = ,
-                        },
-                    },
-
-                    // file (neither audio nor image)
-                    DataContent fileContent => new()
-                    {
-                        Content = fileContent.Base64Data.ToString()
-                    },
-                    HostedFileContent fileContent => new()
-                    {
-                        Content = fileContent.FileId
-                    },
-
-                    // function call
-                    FunctionCallContent functionCallContent => new()
-                    {
-                        ToolCalls = [functionCallContent.ToChoiceMessageToolCall()]
-                    },
-
-                    // function result. ChatCompletions dont provide the results of function result per API reference
-                    FunctionResultContent functionResultContent => null,
-
-                    // ignore
-                    _ => null
-                };
-
-                if (choiceMessage is null)
-                {
-                    // not supported, but expected content type.
-                    continue;
-                }
-
-                choiceMessage.Role = message.Role.Value;
-                choiceMessage.Annotations = content.Annotations?.ToChoiceMessageAnnotations();
-
-                var choice = new ChatCompletionChoice
-                {
-                    Index = index++,
-                    Message = choiceMessage,
-                    FinishReason = finishReason
-                };
-
-                chatCompletionChoices.Add(choice);
-            }
-        }
-
-        return chatCompletionChoices;
+        return
+            response.RawRepresentation as ChatCompletion ??
+            response.AsChatResponse().AsOpenAIChatCompletion();
     }
 
     /// <summary>
-    /// Converts UsageDetails to CompletionUsage.
+    /// Creates or extracts a native OpenAI <see cref="ResponseResult"/> object from an <see cref="AgentResponse"/>.
     /// </summary>
-    /// <param name="usage">The usage details to convert.</param>
-    /// <returns>A CompletionUsage object with zeros if usage is null.</returns>
-    public static CompletionUsage ToCompletionUsage(this UsageDetails? usage)
+    /// <param name="response">The agent response.</param>
+    /// <returns>The OpenAI <see cref="ResponseResult"/> object.</returns>
+    /// <exception cref="ArgumentNullException"><paramref name="response"/> is <see langword="null"/>.</exception>
+    public static ResponseResult AsOpenAIResponse(this AgentResponse response)
     {
-        if (usage == null)
-        {
-            return CompletionUsage.Zero;
-        }
+        Throw.IfNull(response);
 
-        var cachedTokens = usage.AdditionalCounts?.TryGetValue("InputTokenDetails.CachedTokenCount", out var cachedInputToken) ?? false
-            ? (int)cachedInputToken
-            : 0;
-        var reasoningTokens =
-            usage.AdditionalCounts?.TryGetValue("OutputTokenDetails.ReasoningTokenCount", out var reasoningToken) ?? false
-                ? (int)reasoningToken
-                : 0;
-
-        return new CompletionUsage
-        {
-            PromptTokens = (int)(usage.InputTokenCount ?? 0),
-            PromptTokensDetails = new() { CachedTokens = cachedTokens },
-            CompletionTokens = (int)(usage.OutputTokenCount ?? 0),
-            CompletionTokensDetails = new() { ReasoningTokens = reasoningTokens },
-            TotalTokens = (int)(usage.TotalTokenCount ?? 0)
-        };
-    }
-
-    public static IList<ChoiceMessageAnnotation> ToChoiceMessageAnnotations(this IList<AIAnnotation> annotations)
-    {
-        var result = new List<ChoiceMessageAnnotation>();
-        foreach (var annotation in annotations.OfType<CitationAnnotation>())
-        {
-            if (annotation is null)
-            {
-                continue;
-            }
-
-            // may point to mulitple regions in the AIContent.
-            // we need to unroll another loop for regions then -> chatCompletions only point to single region per annotation
-
-            var regions = annotation.AnnotatedRegions?.OfType<TextSpanAnnotatedRegion>().Where(x => x.StartIndex is not null && x.EndIndex is not null);
-            if (regions is not null)
-            {
-                foreach (var region in regions)
-                {
-                    result.Add(new()
-                    {
-                        AnnotationUrlCitation = new AnnotationUrlCitation
-                        {
-                            Url = annotation.Url?.ToString(),
-                            Title = annotation.Title,
-                            StartIndex = region.StartIndex,
-                            EndIndex = region.EndIndex
-                        }
-                    });
-                }
-            }
-            else
-            {
-                result.Add(new()
-                {
-                    AnnotationUrlCitation = new AnnotationUrlCitation
-                    {
-                        Url = annotation.Url?.ToString(),
-                        Title = annotation.Title
-                    }
-                });
-            }
-        }
-
-        return result;
-    }
-
-    public static ChoiceMessageToolCall ToChoiceMessageToolCall(this FunctionCallContent functionCall)
-    {
-        return new()
-        {
-            Id = functionCall.CallId,
-            Function = new()
-            {
-                Name = functionCall.Name,
-                Arguments = JsonSerializer.Serialize(functionCall.Arguments, ChatCompletionsJsonContext.Default.DictionaryStringObject)
-            }
-        };
+        return
+            response.RawRepresentation as ResponseResult ??
+            response.AsChatResponse().AsOpenAIResponseResult();
     }
 }
