@@ -1,75 +1,175 @@
 ﻿// Copyright (c) Microsoft. All rights reserved.
 
+using System;
+using System.Collections.Generic;
+using System.Diagnostics;
+using System.Linq;
+using System.Text;
+using System.Text.Json;
+using System.Text.RegularExpressions;
 using Microsoft.Extensions.AI;
 
-namespace Microsoft.Agents.AI;
+namespace Microsoft.Agents.AI.Workflows.Specialized.Magentic;
 
-/// <summary>
-/// Contains extension methods for <see cref="ChatMessage"/>
-/// </summary>
-public static class ChatMessageExtensions
+internal static partial class ChatMessageExtensions
 {
-    /// <summary>
-    /// Gets the source type of the provided <see cref="ChatMessage"/> in the context of messages passed into an agent run.
-    /// </summary>
-    /// <param name="message">The <see cref="ChatMessage"/> for which we need the source type.</param>
-    /// <returns>An <see cref="AgentRequestMessageSourceType"/> value indicating the source type of the <see cref="ChatMessage"/>. Defaults to <see
-    /// cref="AgentRequestMessageSourceType.External"/> if no explicit source is defined.</returns>
-    public static AgentRequestMessageSourceType GetAgentRequestMessageSourceType(this ChatMessage message)
+    private static void ProcessAIContents(StringBuilder resultBuilder, IEnumerable<AIContent> contents, StreamingToolCallResultPairMatcher? pairMatcher = null)
     {
-        if (message.AdditionalProperties?.TryGetValue(AgentRequestMessageSourceAttribution.AdditionalPropertiesKey, out var attribution) is true
-            && attribution is AgentRequestMessageSourceAttribution typedAttribution)
-        {
-            return typedAttribution.SourceType;
-        }
+        pairMatcher ??= new();
 
-        return AgentRequestMessageSourceType.External;
+        foreach (AIContent content in contents)
+        {
+            switch (content)
+            {
+                case TextContent textContent:
+                    resultBuilder.AppendLine(textContent.Text);
+                    break;
+
+                //case DataContent dataContent:
+                //    // We really do not know how to deal with anything other than image data with descriptions, which is not
+                //    // a well-defined concept in MEAI (as contrasted with AutoGen's ImageContent type)
+                //    break;
+
+                case ErrorContent errorContent:
+                    resultBuilder.AppendLine($"[ERROR{(errorContent.ErrorCode != null ? $"(Code={errorContent.ErrorCode})" : string.Empty)}]");
+                    resultBuilder.AppendLine(errorContent.Message);
+
+                    if (errorContent.Details != null)
+                    {
+                        resultBuilder.Append("Details:").AppendLine(errorContent.Details);
+                    }
+
+                    break;
+
+                case FunctionCallContent functionCallContent:
+                    pairMatcher.CollectFunctionCall(functionCallContent);
+                    break;
+
+                case FunctionResultContent functionResultContent:
+                    pairMatcher.TryResolveFunctionCall(functionResultContent, out string? functionName);
+                    string result = functionResultContent.Result?.ToString() ?? string.Empty;
+
+                    resultBuilder.AppendLine($"[Tool Call '{functionName ?? functionResultContent.CallId}' Result]")
+                                 .AppendLine(result);
+
+                    break;
+
+                case McpServerToolCallContent mstContent:
+                    pairMatcher.CollectMcpServerToolCall(mstContent);
+                    break;
+
+                case McpServerToolResultContent mstResultContent:
+                    if (mstResultContent.Outputs?.Any() is true)
+                    {
+                        pairMatcher.TryResolveMcpServerToolCall(mstResultContent, out string? mcpServerToolName);
+                        resultBuilder.AppendLine($"[Start MCP Server Tool Call '{mcpServerToolName ?? mstResultContent.CallId}' Results]");
+
+                        ProcessAIContents(resultBuilder, mstResultContent.Outputs!);
+
+                        resultBuilder.AppendLine($"[End MCP Server Tool Call '{mcpServerToolName ?? mstResultContent.CallId}']");
+                    }
+
+                    break;
+                case TextReasoningContent reasoningContent:
+                    if (!string.IsNullOrWhiteSpace(reasoningContent.Text))
+                    {
+                        resultBuilder.Append("[Reasoning] ")
+                                     .AppendLine(reasoningContent.Text);
+                    }
+
+                    break;
+
+                case UriContent uriContent:
+                    resultBuilder.AppendLine(uriContent.Uri.ToString());
+                    break;
+            }
+        }
     }
 
-    /// <summary>
-    /// Gets the source id of the provided <see cref="ChatMessage"/> in the context of messages passed into an agent run.
-    /// </summary>
-    /// <param name="message">The <see cref="ChatMessage"/> for which we need the source id.</param>
-    /// <returns>An <see cref="string"/> value indicating the source id of the <see cref="ChatMessage"/>. Defaults to <see langword="null"/>
-    /// if no explicit source id is defined.</returns>
-    public static string? GetAgentRequestMessageSourceId(this ChatMessage message)
+    public static string GetText(this List<ChatMessage> messages)
     {
-        if (message.AdditionalProperties?.TryGetValue(AgentRequestMessageSourceAttribution.AdditionalPropertiesKey, out var attribution) is true
-            && attribution is AgentRequestMessageSourceAttribution typedAttribution)
+        if (messages.Count == 0)
         {
-            return typedAttribution.SourceId;
+            return string.Empty;
         }
 
-        return null;
-    }
-
-    /// <summary>
-    /// Ensure that the provided message is tagged with the provided source type and source id in the context of a specific agent run.
-    /// </summary>
-    /// <param name="message">The message to tag.</param>
-    /// <param name="sourceType">The source type to tag the message with.</param>
-    /// <param name="sourceId">The source id to tag the message with.</param>
-    /// <returns>The tagged message.</returns>
-    /// <remarks>
-    /// If the message is already tagged with the provided source type and source id, it is returned as is.
-    /// Otherwise, a cloned message is returned with the appropriate tagging in the AdditionalProperties.
-    /// </remarks>
-    public static ChatMessage WithAgentRequestMessageSource(this ChatMessage message, AgentRequestMessageSourceType sourceType, string? sourceId = null)
-    {
-        if (message.AdditionalProperties != null
-            // Check if the message was already tagged with the required source type and source id
-            && message.AdditionalProperties.TryGetValue(AgentRequestMessageSourceAttribution.AdditionalPropertiesKey, out var messageSourceAttribution)
-            && messageSourceAttribution is AgentRequestMessageSourceAttribution typedMessageSourceAttribution
-            && typedMessageSourceAttribution.SourceType == sourceType
-            && typedMessageSourceAttribution.SourceId == sourceId)
+        StringBuilder builder = new();
+        StreamingToolCallResultPairMatcher pairMatcher = new();
+        foreach (ChatMessage message in messages)
         {
-            return message;
+            ProcessAIContents(builder, message.Contents, pairMatcher);
         }
 
-        message = message.Clone();
-        message.AdditionalProperties ??= new();
-        message.AdditionalProperties[AgentRequestMessageSourceAttribution.AdditionalPropertiesKey] =
-            new AgentRequestMessageSourceAttribution(sourceType, sourceId);
-        return message;
+        return builder.ToString();
     }
+
+    private const string FencedJsonRegexPattern = @"```(?<lang>[a-z]+)?\s*(?<json>\{[\s\S]*?\})\s*```";
+#if NET
+    [GeneratedRegex(FencedJsonRegexPattern, RegexOptions.IgnoreCase | RegexOptions.CultureInvariant | RegexOptions.ExplicitCapture)]
+    public static partial Regex FencedJsonRegex();
+#else
+    public static Regex FencedJsonRegex() => s_fencedJsonRegex;
+    private static readonly Regex s_fencedJsonRegex =
+        new(FencedJsonRegexPattern, RegexOptions.Compiled | RegexOptions.CultureInvariant | RegexOptions.ExplicitCapture);
+#endif
+
+    internal static JsonElement ExtractJson(string messageText)
+    {
+        Match match = FencedJsonRegex().Match(messageText);
+        if (match.Success)
+        {
+            return JsonElement.Parse(match.Groups["json"].Value);
+        }
+
+        int start = messageText.IndexOf('{'), scanHead = start;
+        int? end = null;
+
+        if (scanHead < 0)
+        {
+            throw new InvalidOperationException("No JSON object found.");
+        }
+
+        int depth = 0;
+        bool inQuotes = false, inEscape = false;
+        for (; scanHead < messageText.Length && end is null; scanHead++)
+        {
+            if (inEscape)
+            {
+                inEscape = false;
+                continue;
+            }
+
+            switch (messageText[scanHead])
+            {
+                case '{' when !inQuotes:
+                    depth++;
+                    break;
+                case '}' when !inQuotes:
+                    depth--;
+                    if (depth == 0)
+                    {
+                        end = scanHead;
+                    }
+
+                    break;
+                case '\"':
+                    // We already handled inEscape, so we can always flip inQuotes here
+                    inQuotes = !inQuotes;
+                    break;
+                case '\\':
+                    Debug.Assert(!inEscape);
+                    inEscape = true;
+                    break;
+            }
+        }
+
+        if (end is null)
+        {
+            throw new InvalidOperationException("Unbalanced JSON braces.");
+        }
+
+        return JsonElement.Parse(messageText.Substring(start, end.Value - start + 1));
+    }
+
+    public static JsonElement ExtractJson(this ChatMessage message) => ExtractJson(message.Text);
 }
