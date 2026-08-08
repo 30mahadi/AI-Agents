@@ -2,212 +2,206 @@
 
 using System;
 using System.Collections.Generic;
-using System.Runtime.CompilerServices;
-using System.Threading;
-using System.Threading.Tasks;
+using System.Linq;
+using System.Text.Json;
+using Microsoft.Agents.AI.Hosting.OpenAI.ChatCompletions.Models;
 using Microsoft.Extensions.AI;
-using Microsoft.Shared.Diagnostics;
 
-namespace Microsoft.Agents.AI;
+namespace Microsoft.Agents.AI.Hosting.OpenAI.ChatCompletions;
 
 /// <summary>
-/// Provides extension methods for working with <see cref="AgentResponse"/> and <see cref="AgentResponseUpdate"/> instances.
+/// Extension methods for converting agent responses to ChatCompletion models.
 /// </summary>
-public static class AgentResponseExtensions
+internal static class AgentResponseExtensions
 {
-    /// <summary>
-    /// Creates a <see cref="ChatResponse"/> from an <see cref="AgentResponse"/> instance.
-    /// </summary>
-    /// <param name="response">The <see cref="AgentResponse"/> to convert.</param>
-    /// <returns>A <see cref="ChatResponse"/> built from the specified <paramref name="response"/>.</returns>
-    /// <exception cref="ArgumentNullException"><paramref name="response"/> is <see langword="null"/>.</exception>
-    /// <remarks>
-    /// If the <paramref name="response"/>'s <see cref="AgentResponse.RawRepresentation"/> is already a
-    /// <see cref="ChatResponse"/> instance, that instance is returned directly.
-    /// Otherwise, a new <see cref="ChatResponse"/> is created and populated with the data from the <paramref name="response"/>.
-    /// The resulting instance is a shallow copy; any reference-type members (e.g. <see cref="AgentResponse.Messages"/>)
-    /// will be shared between the two instances.
-    /// </remarks>
-    public static ChatResponse AsChatResponse(this AgentResponse response)
+    public static ChatCompletion ToChatCompletion(this AgentResponse agentResponse, CreateChatCompletion request)
     {
-        Throw.IfNull(response);
+        IList<ChatCompletionChoice> choices = agentResponse.ToChoices();
 
-        return
-            response.RawRepresentation as ChatResponse ??
-            new()
-            {
-                AdditionalProperties = response.AdditionalProperties,
-                CreatedAt = response.CreatedAt,
-                FinishReason = response.FinishReason,
-                Messages = response.Messages,
-                RawRepresentation = response,
-                ResponseId = response.ResponseId,
-                Usage = response.Usage,
-                ContinuationToken = response.ContinuationToken,
-            };
-    }
-
-    /// <summary>
-    /// Creates a <see cref="ChatResponseUpdate"/> from an <see cref="AgentResponseUpdate"/> instance.
-    /// </summary>
-    /// <param name="responseUpdate">The <see cref="AgentResponseUpdate"/> to convert.</param>
-    /// <returns>A <see cref="ChatResponseUpdate"/> built from the specified <paramref name="responseUpdate"/>.</returns>
-    /// <exception cref="ArgumentNullException"><paramref name="responseUpdate"/> is <see langword="null"/>.</exception>
-    /// <remarks>
-    /// If the <paramref name="responseUpdate"/>'s <see cref="AgentResponseUpdate.RawRepresentation"/> is already a
-    /// <see cref="ChatResponseUpdate"/> instance, that instance is returned directly.
-    /// Otherwise, a new <see cref="ChatResponseUpdate"/> is created and populated with the data from the <paramref name="responseUpdate"/>.
-    /// The resulting instance is a shallow copy; any reference-type members (e.g. <see cref="AgentResponseUpdate.Contents"/>)
-    /// will be shared between the two instances.
-    /// </remarks>
-    public static ChatResponseUpdate AsChatResponseUpdate(this AgentResponseUpdate responseUpdate)
-    {
-        Throw.IfNull(responseUpdate);
-
-        return
-            responseUpdate.RawRepresentation as ChatResponseUpdate ??
-            new()
-            {
-                AdditionalProperties = responseUpdate.AdditionalProperties,
-                AuthorName = responseUpdate.AuthorName,
-                Contents = responseUpdate.Contents,
-                CreatedAt = responseUpdate.CreatedAt,
-                FinishReason = responseUpdate.FinishReason,
-                MessageId = responseUpdate.MessageId,
-                RawRepresentation = responseUpdate,
-                ResponseId = responseUpdate.ResponseId,
-                Role = responseUpdate.Role,
-                ContinuationToken = responseUpdate.ContinuationToken,
-            };
-    }
-
-    /// <summary>
-    /// Creates an asynchronous enumerable of <see cref="ChatResponseUpdate"/> instances from an asynchronous
-    /// enumerable of <see cref="AgentResponseUpdate"/> instances.
-    /// </summary>
-    /// <param name="responseUpdates">The sequence of <see cref="AgentResponseUpdate"/> instances to convert.</param>
-    /// <returns>An asynchronous enumerable of <see cref="ChatResponseUpdate"/> instances built from <paramref name="responseUpdates"/>.</returns>
-    /// <exception cref="ArgumentNullException"><paramref name="responseUpdates"/> is <see langword="null"/>.</exception>
-    /// <remarks>
-    /// Each <see cref="AgentResponseUpdate"/> is converted to a <see cref="ChatResponseUpdate"/> using
-    /// <see cref="AsChatResponseUpdate"/>.
-    /// </remarks>
-    public static async IAsyncEnumerable<ChatResponseUpdate> AsChatResponseUpdatesAsync(
-        this IAsyncEnumerable<AgentResponseUpdate> responseUpdates)
-    {
-        Throw.IfNull(responseUpdates);
-
-        await foreach (var responseUpdate in responseUpdates.ConfigureAwait(false))
+        return new ChatCompletion
         {
-            yield return responseUpdate.AsChatResponseUpdate();
-        }
-    }
-
-    /// <summary>
-    /// Combines a sequence of <see cref="AgentResponseUpdate"/> instances into a single <see cref="AgentResponse"/>.
-    /// </summary>
-    /// <param name="updates">The sequence of updates to be combined into a single response.</param>
-    /// <returns>A single <see cref="AgentResponse"/> that represents the combined state of all the updates.</returns>
-    /// <exception cref="ArgumentNullException"><paramref name="updates"/> is <see langword="null"/>.</exception>
-    /// <remarks>
-    /// As part of combining <paramref name="updates"/> into a single <see cref="AgentResponse"/>, the method will attempt to reconstruct
-    /// <see cref="ChatMessage"/> instances. This includes using <see cref="AgentResponseUpdate.MessageId"/> to determine
-    /// message boundaries, as well as coalescing contiguous <see cref="AIContent"/> items where applicable, e.g. multiple
-    /// <see cref="TextContent"/> instances in a row may be combined into a single <see cref="TextContent"/>.
-    /// </remarks>
-    public static AgentResponse ToAgentResponse(
-        this IEnumerable<AgentResponseUpdate> updates)
-    {
-        _ = Throw.IfNull(updates);
-
-        AgentResponseDetails additionalDetails = new();
-        ChatResponse chatResponse =
-            AsChatResponseUpdatesWithAdditionalDetails(updates, additionalDetails)
-            .ToChatResponse();
-
-        return new AgentResponse(chatResponse)
-        {
-            AgentId = additionalDetails.AgentId,
+            Id = IdGenerator.NewId(prefix: "chatcmpl", delimiter: "-", stringLength: 13),
+            Choices = choices,
+            Created = (agentResponse.CreatedAt ?? DateTimeOffset.UtcNow).ToUnixTimeSeconds(),
+            Model = request.Model,
+            Usage = agentResponse.Usage.ToCompletionUsage(),
+            ServiceTier = request.ServiceTier ?? "default"
         };
     }
 
-    /// <summary>
-    /// Asynchronously combines a sequence of <see cref="AgentResponseUpdate"/> instances into a single <see cref="AgentResponse"/>.
-    /// </summary>
-    /// <param name="updates">The asynchronous sequence of updates to be combined into a single response.</param>
-    /// <param name="cancellationToken">The <see cref="CancellationToken"/> to monitor for cancellation requests. The default is <see cref="CancellationToken.None"/>.</param>
-    /// <returns>A task that represents the asynchronous operation. The task result contains a single <see cref="AgentResponse"/> that represents the combined state of all the updates.</returns>
-    /// <exception cref="ArgumentNullException"><paramref name="updates"/> is <see langword="null"/>.</exception>
-    /// <remarks>
-    /// <para>
-    /// This is the asynchronous version of <see cref="ToAgentResponse(IEnumerable{AgentResponseUpdate})"/>.
-    /// It performs the same combining logic but operates on an asynchronous enumerable of updates.
-    /// </para>
-    /// <para>
-    /// As part of combining <paramref name="updates"/> into a single <see cref="AgentResponse"/>, the method will attempt to reconstruct
-    /// <see cref="ChatMessage"/> instances. This includes using <see cref="AgentResponseUpdate.MessageId"/> to determine
-    /// message boundaries, as well as coalescing contiguous <see cref="AIContent"/> items where applicable, e.g. multiple
-    /// <see cref="TextContent"/> instances in a row may be combined into a single <see cref="TextContent"/>.
-    /// </para>
-    /// </remarks>
-    public static Task<AgentResponse> ToAgentResponseAsync(
-        this IAsyncEnumerable<AgentResponseUpdate> updates,
-        CancellationToken cancellationToken = default)
+    public static List<ChatCompletionChoice> ToChoices(this AgentResponse agentResponse)
     {
-        _ = Throw.IfNull(updates);
+        var chatCompletionChoices = new List<ChatCompletionChoice>();
+        var index = 0;
 
-        return ToAgentResponseAsync(updates, cancellationToken);
+        var finishReason = agentResponse.FinishReason?.ToString() ?? ChatFinishReason.Stop.Value; // "stop" is a natural stop point; returning this by-default
 
-        static async Task<AgentResponse> ToAgentResponseAsync(
-            IAsyncEnumerable<AgentResponseUpdate> updates,
-            CancellationToken cancellationToken)
+        foreach (var message in agentResponse.Messages)
         {
-            AgentResponseDetails additionalDetails = new();
-            ChatResponse chatResponse = await
-                AsChatResponseUpdatesWithAdditionalDetailsAsync(updates, additionalDetails, cancellationToken)
-                .ToChatResponseAsync(cancellationToken)
-                .ConfigureAwait(false);
-
-            return new AgentResponse(chatResponse)
+            foreach (var content in message.Contents)
             {
-                AgentId = additionalDetails.AgentId,
-            };
+                ChoiceMessage? choiceMessage = content switch
+                {
+                    // text
+                    TextContent textContent => new()
+                    {
+                        Content = textContent.Text
+                    },
+
+                    // image, see how MessageContentPartConverter packs the content types
+                    DataContent imageContent when imageContent.HasTopLevelMediaType("image") => new()
+                    {
+                        Content = imageContent.Base64Data.ToString()
+                    },
+                    UriContent urlContent when urlContent.HasTopLevelMediaType("image") => new()
+                    {
+                        Content = urlContent.Uri.ToString()
+                    },
+
+                    // audio
+                    DataContent audioContent when audioContent.HasTopLevelMediaType("audio") => new()
+                    {
+                        Audio = new()
+                        {
+                            Data = audioContent.Base64Data.ToString(),
+                            Id = audioContent.Name,
+                            //Transcript = ,
+                            //ExpiresAt = ,
+                        },
+                    },
+
+                    // file (neither audio nor image)
+                    DataContent fileContent => new()
+                    {
+                        Content = fileContent.Base64Data.ToString()
+                    },
+                    HostedFileContent fileContent => new()
+                    {
+                        Content = fileContent.FileId
+                    },
+
+                    // function call
+                    FunctionCallContent functionCallContent => new()
+                    {
+                        ToolCalls = [functionCallContent.ToChoiceMessageToolCall()]
+                    },
+
+                    // function result. ChatCompletions dont provide the results of function result per API reference
+                    FunctionResultContent functionResultContent => null,
+
+                    // ignore
+                    _ => null
+                };
+
+                if (choiceMessage is null)
+                {
+                    // not supported, but expected content type.
+                    continue;
+                }
+
+                choiceMessage.Role = message.Role.Value;
+                choiceMessage.Annotations = content.Annotations?.ToChoiceMessageAnnotations();
+
+                var choice = new ChatCompletionChoice
+                {
+                    Index = index++,
+                    Message = choiceMessage,
+                    FinishReason = finishReason
+                };
+
+                chatCompletionChoices.Add(choice);
+            }
         }
+
+        return chatCompletionChoices;
     }
 
-    private static IEnumerable<ChatResponseUpdate> AsChatResponseUpdatesWithAdditionalDetails(
-        IEnumerable<AgentResponseUpdate> updates,
-        AgentResponseDetails additionalDetails)
+    /// <summary>
+    /// Converts UsageDetails to CompletionUsage.
+    /// </summary>
+    /// <param name="usage">The usage details to convert.</param>
+    /// <returns>A CompletionUsage object with zeros if usage is null.</returns>
+    public static CompletionUsage ToCompletionUsage(this UsageDetails? usage)
     {
-        foreach (var update in updates)
+        if (usage == null)
         {
-            UpdateAdditionalDetails(update, additionalDetails);
-            yield return update.AsChatResponseUpdate();
+            return CompletionUsage.Zero;
         }
-    }
 
-    private static async IAsyncEnumerable<ChatResponseUpdate> AsChatResponseUpdatesWithAdditionalDetailsAsync(
-        IAsyncEnumerable<AgentResponseUpdate> updates,
-        AgentResponseDetails additionalDetails,
-        [EnumeratorCancellation] CancellationToken cancellationToken)
-    {
-        await foreach (var update in updates.WithCancellation(cancellationToken).ConfigureAwait(false))
+        var cachedTokens = usage.AdditionalCounts?.TryGetValue("InputTokenDetails.CachedTokenCount", out var cachedInputToken) ?? false
+            ? (int)cachedInputToken
+            : 0;
+        var reasoningTokens =
+            usage.AdditionalCounts?.TryGetValue("OutputTokenDetails.ReasoningTokenCount", out var reasoningToken) ?? false
+                ? (int)reasoningToken
+                : 0;
+
+        return new CompletionUsage
         {
-            UpdateAdditionalDetails(update, additionalDetails);
-            yield return update.AsChatResponseUpdate();
-        }
+            PromptTokens = (int)(usage.InputTokenCount ?? 0),
+            PromptTokensDetails = new() { CachedTokens = cachedTokens },
+            CompletionTokens = (int)(usage.OutputTokenCount ?? 0),
+            CompletionTokensDetails = new() { ReasoningTokens = reasoningTokens },
+            TotalTokens = (int)(usage.TotalTokenCount ?? 0)
+        };
     }
 
-    private static void UpdateAdditionalDetails(AgentResponseUpdate update, AgentResponseDetails details)
+    public static IList<ChoiceMessageAnnotation> ToChoiceMessageAnnotations(this IList<AIAnnotation> annotations)
     {
-        if (update.AgentId is { Length: > 0 })
+        var result = new List<ChoiceMessageAnnotation>();
+        foreach (var annotation in annotations.OfType<CitationAnnotation>())
         {
-            details.AgentId = update.AgentId;
+            if (annotation is null)
+            {
+                continue;
+            }
+
+            // may point to mulitple regions in the AIContent.
+            // we need to unroll another loop for regions then -> chatCompletions only point to single region per annotation
+
+            var regions = annotation.AnnotatedRegions?.OfType<TextSpanAnnotatedRegion>().Where(x => x.StartIndex is not null && x.EndIndex is not null);
+            if (regions is not null)
+            {
+                foreach (var region in regions)
+                {
+                    result.Add(new()
+                    {
+                        AnnotationUrlCitation = new AnnotationUrlCitation
+                        {
+                            Url = annotation.Url?.ToString(),
+                            Title = annotation.Title,
+                            StartIndex = region.StartIndex,
+                            EndIndex = region.EndIndex
+                        }
+                    });
+                }
+            }
+            else
+            {
+                result.Add(new()
+                {
+                    AnnotationUrlCitation = new AnnotationUrlCitation
+                    {
+                        Url = annotation.Url?.ToString(),
+                        Title = annotation.Title
+                    }
+                });
+            }
         }
+
+        return result;
     }
 
-    private sealed class AgentResponseDetails
+    public static ChoiceMessageToolCall ToChoiceMessageToolCall(this FunctionCallContent functionCall)
     {
-        public string? AgentId { get; set; }
+        return new()
+        {
+            Id = functionCall.CallId,
+            Function = new()
+            {
+                Name = functionCall.Name,
+                Arguments = JsonSerializer.Serialize(functionCall.Arguments, ChatCompletionsJsonContext.Default.DictionaryStringObject)
+            }
+        };
     }
 }

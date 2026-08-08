@@ -1,33 +1,55 @@
 ﻿// Copyright (c) Microsoft. All rights reserved.
 
-using Microsoft.Agents.AI.DevUI;
+using System;
+using Microsoft.Agents.AI;
+using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Hosting;
 
 namespace Microsoft.Extensions.Hosting;
 
 /// <summary>
-/// Extension methods for <see cref="IHostApplicationBuilder"/> to configure DevUI.
+/// Extension methods for <see cref="IHostApplicationBuilder"/> to configure OpenAI support.
 /// </summary>
-public static class MicrosoftAgentAIDevUIHostApplicationBuilderExtensions
+public static class MicrosoftAgentAIHostingOpenAIHostApplicationBuilderExtensions
 {
     /// <summary>
-    /// Adds DevUI services to the host application builder.
+    /// Adds support for exposing <see cref="AIAgent"/> instances via OpenAI ChatCompletions.
     /// </summary>
     /// <param name="builder">The <see cref="IHostApplicationBuilder"/> to configure.</param>
     /// <returns>The <see cref="IHostApplicationBuilder"/> for method chaining.</returns>
-    public static IHostApplicationBuilder AddDevUI(this IHostApplicationBuilder builder)
-        => AddDevUI(builder, configure: null);
-
-    /// <summary>
-    /// Adds DevUI services to the host application builder.
-    /// </summary>
-    /// <param name="builder">The <see cref="IHostApplicationBuilder"/> to configure.</param>
-    /// <param name="configure">Optional callback used to configure <see cref="DevUIOptions"/>.</param>
-    /// <returns>The <see cref="IHostApplicationBuilder"/> for method chaining.</returns>
-    public static IHostApplicationBuilder AddDevUI(this IHostApplicationBuilder builder, Action<DevUIOptions>? configure)
+    public static IHostApplicationBuilder AddOpenAIChatCompletions(this IHostApplicationBuilder builder)
     {
         ArgumentNullException.ThrowIfNull(builder);
 
-        builder.Services.AddDevUI(configure);
+        builder.Services.AddOpenAIChatCompletions();
+
+        return builder;
+    }
+
+    /// <summary>
+    /// Adds support for exposing <see cref="AIAgent"/> instances via OpenAI Responses.
+    /// </summary>
+    /// <param name="builder">The <see cref="IHostApplicationBuilder"/> to configure.</param>
+    /// <returns>The <see cref="IHostApplicationBuilder"/> for method chaining.</returns>
+    public static IHostApplicationBuilder AddOpenAIResponses(this IHostApplicationBuilder builder)
+    {
+        ArgumentNullException.ThrowIfNull(builder);
+
+        builder.Services.AddOpenAIResponses();
+
+        return builder;
+    }
+
+    /// <summary>
+    /// Adds support for exposing <see cref="AIAgent"/> instances via OpenAI Responses.
+    /// </summary>
+    /// <param name="builder">The <see cref="IHostApplicationBuilder"/> to configure.</param>
+    /// <returns>The <see cref="IHostApplicationBuilder"/> for method chaining.</returns>
+    public static IHostApplicationBuilder AddOpenAIConversations(this IHostApplicationBuilder builder)
+    {
+        ArgumentNullException.ThrowIfNull(builder);
+
+        builder.Services.AddOpenAIConversations();
 
         return builder;
     }
