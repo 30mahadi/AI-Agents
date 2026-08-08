@@ -1,27 +1,24 @@
 ﻿// Copyright (c) Microsoft. All rights reserved.
 
-using System.Text.Json.Serialization;
+namespace Microsoft.Agents.AI.Workflows;
 
-namespace Microsoft.Agents.AI.Purview.Models.Common;
-
-/// <summary>
-/// Request execution mode
-/// </summary>
-[JsonConverter(typeof(JsonStringEnumConverter<ExecutionMode>))]
-internal enum ExecutionMode : int
+internal enum ExecutionMode
 {
     /// <summary>
-    /// Evaluate inline.
+    /// Normal streaming mode using the new channel-based implementation.
+    /// Events stream out immediately as they are created.
     /// </summary>
-    EvaluateInline = 1,
+    OffThread,
 
     /// <summary>
-    /// Evaluate offline.
+    /// Lockstep mode where events are batched per superstep.
+    /// Events are accumulated and emitted after each superstep completes.
     /// </summary>
-    EvaluateOffline = 2,
+    Lockstep,
 
     /// <summary>
-    /// Unknown future value.
+    /// A special execution mode for subworkflows - it functions like OffThread, but without the internal task
+    /// running super steps, as they are implemented by being driven directly by the hosting workflow
     /// </summary>
-    UnknownFutureValue = 3
+    Subworkflow,
 }
