@@ -1,66 +1,49 @@
-name: Sample Validation Setup
-description: Sets up the environment for sample validation (checkout, Node.js, Copilot CLI, Azure login, Python)
+name: Reusable Setup UV
+description: Reusable workflow to setup uv environment
 
 inputs:
-  azure-client-id:
-    description: Azure Client ID for OIDC login
-    required: true
-  azure-tenant-id:
-    description: Azure Tenant ID for OIDC login
-    required: true
-  azure-subscription-id:
-    description: Azure Subscription ID for OIDC login
-    required: true
-  python-version:
-    description: The Python version to set up
-    required: false
-    default: "3.12"
-  os:
-    description: The operating system to set up
-    required: false
-    default: "Linux"
+    python-version:
+      description: The Python version to set up
+      required: true
+    os:
+      description: The operating system to set up
+      required: true
+    exclude-packages:
+      description: Space-separated list of packages to exclude from uv sync
+      required: false
+      default: ''
 
 runs:
-  using: "composite"
-  steps:
-    - name: Set up Node.js environment
-      uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6
-      with:
-        node-version: 22
-
-    - name: Install Copilot CLI
-      shell: bash
-      run: npm install -g @github/copilot
-
-    - name: Test Copilot CLI
-      shell: bash
-      run: copilot --version && copilot -p "What can you do in one sentence?"
-
-    - name: Set up python and install the project
-      uses: ./.github/actions/python-setup
-      with:
-        python-version: ${{ inputs.python-version }}
-        os: ${{ inputs.os }}
-
-    - name: Restore sample playbooks
-      # Restore-only. The matching save is a separate step in each job that runs with
-      # `if: ${{ !cancelled() }}` (see .github/actions/sample-validation-save-playbooks).
-      # A combined actions/cache would skip its post-job save on a failing job
-      # (post-if: success()), so playbooks authored for samples that failed validation
-      # would never persist. Keyed per job so each validate-* job keeps its own playbooks.
-      uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-      with:
-        # Must match the sample_validation --playbooks-dir default, which resolves to
-        # samples/sample_validation/playbooks (see python/scripts/sample_validation/__main__.py).
-        # If a job overrides --playbooks-dir, update this path to match.
-        path: python/samples/sample_validation/playbooks/
-        key: sample-playbooks-${{ github.job }}-${{ github.run_id }}
-        restore-keys: |
-          sample-playbooks-${{ github.job }}-
-
-    - name: Azure CLI Login
-      uses: azure/login@a457da9ea143d694b1b9c7c869ebb04ebe844ef5 # v2
-      with:
-        client-id: ${{ inputs.azure-client-id }}
-        tenant-id: ${{ inputs.azure-tenant-id }}
-        subscription-id: ${{ inputs.azure-subscription-id }}
+    using: "composite"
+    steps:
+      - name: Set up uv
+        uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
+        with:
+            version-file: "python/pyproject.toml"
+            enable-cache: true
+            cache-suffix: ${{ inputs.os }}-${{ inputs.python-version }}
+            cache-dependency-glob: "**/uv.lock"
+      - name: Exclude incompatible workspace packages
+        if: ${{ inputs.exclude-packages != '' }}
+        shell: bash
+        run: |
+          for pkg in ${{ inputs.exclude-packages }}; do
+            for f in python/packages/*/pyproject.toml; do
+              if grep -q "name = \"$pkg\"" "$f"; then
+                pkg_dir=$(dirname "$f" | sed 's|python/||')
+                echo "Excluding workspace package: $pkg ($pkg_dir)"
+                if awk '/^\[tool\.uv\.workspace\]/{f=1;next} /^\[/{f=0} f && /^exclude = \[/{found=1} END{exit !found}' python/pyproject.toml; then
+                  if ! awk '/^\[tool\.uv\.workspace\]/{f=1;next} /^\[/{f=0} f && /^exclude = \[/ && index($0, "\"'"$pkg_dir"'\"")' python/pyproject.toml | grep -q .; then
+                    sed -i.bak '/\[tool\.uv\.workspace\]/,/^\[/ { /^exclude = \[/ s|\]|, "'"$pkg_dir"'"]| }' python/pyproject.toml
+                  fi
+                else
+                  sed -i.bak '/\[tool\.uv\.workspace\]/a\exclude = ["'"$pkg_dir"'"]' python/pyproject.toml
+                fi
+                sed -i.bak '/'"$pkg"' = { workspace = true }/d' python/pyproject.toml
+              fi
+            done
+          done
+      - name: Install the project
+        shell: bash
+        run: |
+          cd python && uv sync --all-packages --all-extras --all-groups --prerelease=if-necessary-or-explicit
