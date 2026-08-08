@@ -1,63 +1,78 @@
 ﻿// Copyright (c) Microsoft. All rights reserved.
 
 using System;
-using System.Security.Claims;
-using Microsoft.AspNetCore.Http;
-using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Agents.AI;
+using Microsoft.Agents.AI.Hosting.OpenAI;
+using Microsoft.Agents.AI.Hosting.OpenAI.ChatCompletions;
+using Microsoft.Agents.AI.Hosting.OpenAI.Conversations;
+using Microsoft.Agents.AI.Hosting.OpenAI.Responses;
+using Microsoft.AspNetCore.Http.Json;
+using Microsoft.Extensions.DependencyInjection.Extensions;
 
-namespace Microsoft.Agents.AI.Hosting;
+namespace Microsoft.Extensions.DependencyInjection;
 
 /// <summary>
-/// Extension methods for configuring AI hosting services in an <see cref="IServiceCollection"/>.
+/// Extension methods for <see cref="IServiceCollection"/> to configure OpenAI support.
 /// </summary>
-public static class ServiceCollectionExtensions
+public static class MicrosoftAgentAIHostingOpenAIServiceCollectionExtensions
 {
     /// <summary>
-    /// Registers an <see cref="AgentIsolationKeyProvider"/> that uses claims from the current user's identity
-    /// to generate isolation keys for agent-owned resources.
+    /// Adds support for exposing <see cref="AIAgent"/> instances via OpenAI ChatCompletions.
     /// </summary>
-    /// <param name="services">The <see cref="IServiceCollection"/> to add services to.</param>
-    /// <param name="options">Optional configuration for the claims-based isolation key provider.</param>
-    /// <returns>The <see cref="IServiceCollection"/> so that additional calls can be chained.</returns>
-    /// <remarks>
-    /// <para>
-    /// This method requires <see cref="IHttpContextAccessor"/> to be registered in the service collection.
-    /// Ensure that <c>services.AddHttpContextAccessor()</c> has been called before using this method.
-    /// </para>
-    /// <para>
-    /// When <paramref name="options"/> is not supplied, the isolation key is derived from the
-    /// <see cref="ClaimTypes.NameIdentifier"/> claim, a stable unique subject identifier. For OpenID
-    /// Connect tokens (including Microsoft Entra ID), this is typically mapped from the <c>sub</c> claim
-    /// by the default JWT inbound claim mapping. Authentication schemes that do not project a unique
-    /// identifier onto <see cref="ClaimTypes.NameIdentifier"/> (or hosts that require a different claim
-    /// such as Entra's <c>oid</c>) should override
-    /// <see cref="ClaimsIdentityAgentIsolationKeyProviderOptions.ClaimType"/>; otherwise the key may be
-    /// absent, which causes strict-mode stores to fail.
-    /// </para>
-    /// <para>
-    /// <strong>Security warning:</strong> If you override
-    /// <see cref="ClaimsIdentityAgentIsolationKeyProviderOptions.ClaimType"/>, the chosen claim must
-    /// uniquely identify the principal within the served population. Display names, usernames, email
-    /// aliases, and other mutable or non-unique claims are <strong>unsafe</strong> isolation keys unless
-    /// the host can prove their uniqueness across all callers, because distinct principals that share the
-    /// same claim value would receive the same isolation key and could access one another's persisted data.
-    /// </para>
-    /// </remarks>
-    public static IServiceCollection UseClaimsBasedAgentIsolation(
-        this IServiceCollection services,
-        ClaimsIdentityAgentIsolationKeyProviderOptions? options = null)
+    /// <param name="services">The <see cref="IServiceCollection"/> to configure.</param>
+    /// <returns>The <see cref="IServiceCollection"/> for method chaining.</returns>
+    public static IServiceCollection AddOpenAIChatCompletions(this IServiceCollection services)
     {
-        options ??= new();
-        ServiceDescriptor descriptor = new(typeof(AgentIsolationKeyProvider), CreateIsolationKeyProvider, ServiceLifetime.Singleton);
-        services.Add(descriptor);
+        ArgumentNullException.ThrowIfNull(services);
+
+        services.Configure<JsonOptions>(options => options.SerializerOptions.TypeInfoResolverChain.Add(ChatCompletionsJsonSerializerOptions.Default.TypeInfoResolver!));
 
         return services;
+    }
 
-        object CreateIsolationKeyProvider(IServiceProvider serviceProvider)
+    /// <summary>
+    /// Adds support for exposing <see cref="AIAgent"/> instances via OpenAI Responses.
+    /// Uses the in-memory responses service implementation.
+    /// </summary>
+    /// <param name="services">The <see cref="IServiceCollection"/> to configure.</param>
+    /// <returns>The <see cref="IServiceCollection"/> for method chaining.</returns>
+    public static IServiceCollection AddOpenAIResponses(this IServiceCollection services)
+    {
+        ArgumentNullException.ThrowIfNull(services);
+
+        services.Configure<JsonOptions>(options
+            => options.SerializerOptions.TypeInfoResolverChain.Add(
+                OpenAIHostingJsonContext.Default.Options.TypeInfoResolver!));
+
+        services.TryAddSingleton<IConversationStorage, InMemoryConversationStorage>();
+        services.TryAddSingleton<IAgentConversationIndex, InMemoryAgentConversationIndex>();
+        services.TryAddSingleton<InMemoryStorageOptions>();
+        services.TryAddSingleton<IResponsesService>(sp =>
         {
-            IHttpContextAccessor contextAccessor = serviceProvider.GetRequiredService<IHttpContextAccessor>();
+            var executor = sp.GetRequiredService<IResponseExecutor>();
+            var options = sp.GetRequiredService<InMemoryStorageOptions>();
+            var conversationStorage = sp.GetService<IConversationStorage>();
+            return new InMemoryResponsesService(executor, options, conversationStorage);
+        });
+        services.TryAddSingleton<IResponseExecutor, HostedAgentResponseExecutor>();
 
-            return new ClaimsIdentityAgentIsolationKeyProvider(contextAccessor, options);
-        }
+        return services;
+    }
+
+    /// <summary>
+    /// Adds in-memory conversation storage and indexing services to the service collection.
+    /// This is suitable only for development and testing scenarios.
+    /// </summary>
+    /// <param name="services">The service collection to add services to.</param>
+    /// <returns>The service collection for chaining.</returns>
+    public static IServiceCollection AddOpenAIConversations(this IServiceCollection services)
+    {
+        ArgumentNullException.ThrowIfNull(services);
+
+        // Register storage options
+        services.TryAddSingleton<InMemoryStorageOptions>();
+        services.TryAddSingleton<IConversationStorage, InMemoryConversationStorage>();
+        services.TryAddSingleton<IAgentConversationIndex, InMemoryAgentConversationIndex>();
+        return services;
     }
 }
