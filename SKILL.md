@@ -1,116 +1,130 @@
 ---
-name: pull-requests
-description: >
-  Guidance for creating pull requests and handling PR review comments in the
-  Agent Framework repository. Use this when writing a PR description (filling out
-  the PR template) or when responding to and resolving review comments on an
-  existing PR.
+name: build-and-test
+description: How to build and test .NET projects in the Agent Framework repository. Use this when verifying or testing changes.
 ---
 
-# Pull Request Workflow
+- Only **UnitTest** projects need to be run locally; IntegrationTests require external dependencies.
+- See `../project-structure/SKILL.md` for project structure details.
 
-This skill covers two tasks: (1) writing a high-quality PR description, and
-(2) handling review comments on an existing PR.
-
-## 1. Writing the PR description
-
-Always follow the repository PR template at
-[`.github/pull_request_template.md`](../../pull_request_template.md). Keep its
-exact structure and headings. Fill every section:
-
-### `### Motivation & Context`
-Explain *why* the change is needed: the problem it solves and the scenario it
-contributes to. Describe the net change relative to `main` — this is implied, so
-do **not** spell out "vs main" explicitly.
-
-### `### Description & Review Guide`
-Describe the changes, the overall approach, and the design. Answer the three
-prompts:
-- **What are the major changes?**
-- **What is the impact of these changes?**
-- **What do you want reviewers to focus on?** — This item is for **human
-  reviewers only**. Automated/AI reviewers must ignore it and review the entire
-  change rather than narrowing scope to it.
-
-### `### Related Issue`
-Link the issue the PR fixes using a GitHub closing keyword (`Fixes #123` /
-`Closes #123`) so it closes automatically on merge. A PR with no linked issue may
-be closed regardless of how valid the change is. Before opening, confirm there is
-no other open PR for the same issue; if there is, explain how this PR differs.
-
-### `### Contribution Checklist`
-Check every item that applies. For the breaking-change item:
-- Leave **"This is not a breaking change."** checked for the common case.
-- If the change **is** breaking, add the `breaking change` label **or** put
-  `[BREAKING]` in the title prefix, before or after a language prefix such as
-  `Python:` or `.NET:` — workflows keep the label and the title prefix in sync
-  automatically (see `.github/workflows/label-title-prefix.yml` and
-  `.github/workflows/label-pr.yml`).
-
-### Do not
-- Do **not** add ad-hoc sections such as "Validation" or "Tests run"; CI/CD and
-  the checklist already cover validation status.
-- Do **not** remove or reorder the template's headings.
-
-### Creating the PR
-Open new PRs as **drafts** until they are ready for review. Example:
+## Build, Test, and Lint Commands
 
 ```bash
-gh pr create --repo microsoft/agent-framework --base main \
-  --head <your-fork-owner>:<branch> --draft \
-  --title "<concise title>" --body "<body following the template>"
+# From dotnet/ directory
+dotnet restore --tl:off   # Restore dependencies for all projects
+dotnet build --tl:off     # Build all projects
+dotnet test               # Run all tests
+dotnet format             # Auto-fix formatting for all projects
+
+# Build/test/format a specific project (preferred for isolated/internal changes)
+dotnet build src/Microsoft.Agents.AI.<Package> --tl:off
+dotnet test --project tests/Microsoft.Agents.AI.<Package>.UnitTests
+dotnet format src/Microsoft.Agents.AI.<Package>
+
+# Run a single test
+# Replace the filter values with the appropriate assembly, namespace, class, and method names for the test you want to run and use * as a wildcard elsewhere, e.g. "/*/*/HttpClientTests/GetAsync_ReturnsSuccessStatusCode"
+# Use `--ignore-exit-code 8` to avoid failing the build when no tests are found for some projects
+dotnet test --filter-query "/<assemblyFilter>/<namespaceFilter>/<classFilter>/<methodFilter>" --ignore-exit-code 8
+
+# Run unit tests only
+# Use `--ignore-exit-code 8` to avoid failing the build when no tests are found for integration test projects
+dotnet test --filter-query "/*UnitTests*/*/*/*" --ignore-exit-code 8
 ```
 
-## 2. Handling review comments
+Use `--tl:off` when building to avoid flickering when running commands in the agent.
 
-When a PR receives review comments, follow this sequence — **do not start editing
-code before the user has reviewed the plan**:
+## Speeding Up Builds and Testing
 
-1. **Review the comments.** Read every review comment and thread on the PR,
-   including inline code comments and general review summaries.
-2. **Make a plan.** Produce a concrete plan describing how each comment will be
-   addressed (or why it should not be, with reasoning).
-3. **Let the user review the plan.** Present the plan and wait for the user's
-   approval or adjustments before implementing anything.
-4. **Implement.** Make the agreed changes.
-5. **Reply to every comment.** Add a reply to **all** comments explaining how it
-   was addressed (or the agreed outcome) — leave none unanswered.
-6. **Resolve resolved threads.** Mark a review thread as resolved only when the
-   comment has actually been addressed.
+The full solution is large. Use these shortcuts:
 
-### Useful commands
+| Change type | What to do |
+|-------------|------------|
+| Isolated/Internal logic | Build only the affected project and its `*.UnitTests` project. Fix issues, then build the full solution and run all unit tests. |
+| Public API surface | Build the full solution and run all unit tests immediately. |
 
-List review comments and threads:
+Example: Building a single code project for all target frameworks
 
 ```bash
-# Inline review comments
-gh api repos/{owner}/{repo}/pulls/{pr}/comments
-
-# Review threads with resolution state (GraphQL)
-gh api graphql -f query='
-  query($owner:String!,$repo:String!,$pr:Int!){
-    repository(owner:$owner,name:$repo){
-      pullRequest(number:$pr){
-        reviewThreads(first:100){
-          nodes{ id isResolved comments(first:50){ nodes{ id body author{login} } } }
-        }
-      }
-    }
-  }' -F owner={owner} -F repo={repo} -F pr={pr}
+# From dotnet/ directory
+dotnet build ./src/Microsoft.Agents.AI.Abstractions
 ```
 
-Reply to an inline review comment:
+Example: Building a single code project for just .NET 10.
 
 ```bash
-gh api repos/{owner}/{repo}/pulls/{pr}/comments/{comment_id}/replies \
-  -f body="Addressed in <commit>: <explanation>"
+# From dotnet/ directory
+dotnet build ./src/Microsoft.Agents.AI.Abstractions -f net10.0
 ```
 
-Resolve a review thread (needs the thread node id from the GraphQL query above):
+Example: Running tests for a single project using .NET 10.
 
 ```bash
-gh api graphql -f query='
-  mutation($threadId:ID!){
-    resolveReviewThread(input:{threadId:$threadId}){ thread{ isResolved } }
-  }' -F threadId={thread_id}
+# From dotnet/ directory
+dotnet test --project ./tests/Microsoft.Agents.AI.Abstractions.UnitTests -f net10.0
+```
+
+Example: Running a single test in a specific project using .NET 10.
+Provide the full namespace, class name, and method name for the test you want to run:
+
+```bash
+# From dotnet/ directory
+dotnet test --project ./tests/Microsoft.Agents.AI.Abstractions.UnitTests -f net10.0 --filter-query "/*/Microsoft.Agents.AI.Abstractions.UnitTests/AgentRunOptionsTests/CloningConstructorCopiesProperties"
+```
+
+### Multi-target framework tip
+
+Most projects target multiple .NET frameworks. If the affected code does **not** use `#if` directives for framework-specific logic, pass `-f net10.0` to speed up building and testing.
+
+### Package Restore tip
+
+`dotnet build` will try and restore packages for all projects on each build, which can be slow.
+Unless packages have been changed, or it's the first time building the solution, add `--no-restore` to the build command to skip this step and speed up builds.
+
+Just remember to run `dotnet restore` after pulling changes, making changes to project references, or when building for the first time.
+
+### Testing on Linux tip
+
+Unit tests target both .NET Framework as well as .NET Core. When running on Linux, only the .NET Core tests can be run, as .NET Framework is not supported on Linux.
+
+To run only the .NET Core tests, use the `-f net10.0` option with `dotnet test`.
+
+### Microsoft Testing Platform (MTP)
+
+Tests use the [Microsoft Testing Platform](https://learn.microsoft.com/dotnet/core/testing/unit-testing-platform-intro) via xUnit v3. Key differences from the legacy VSTest runner:
+
+- **`dotnet test` requires `--project`** to specify a test project directly (positional arguments are no longer supported).
+- **Test output** uses the MTP format (e.g., `[✓112/x0/↓0]` progress and `Test run summary: Passed!`).
+- **TRX reports** use `--report-xunit-trx` instead of `--logger trx`.
+- **Code coverage** uses `Microsoft.Testing.Extensions.CodeCoverage` with `--coverage --coverage-output-format cobertura`.
+- **Running a test project directly** is supported via `dotnet run --project <test-project>`. This bypasses the `dotnet test` infrastructure and runs the test executable directly with the MTP command line.
+
+- **Running tests across the solution** with a filter may cause some projects to match zero tests, which MTP treats as a failure (exit code 8). Use `--ignore-exit-code 8` to suppress this:
+
+```bash
+# Run all unit tests across the solution, ignoring projects with no matching tests
+dotnet test --solution ./agent-framework-dotnet.slnx --no-build -f net10.0 --ignore-exit-code 8
+```
+
+- **Running tests with `--solution` for a specific TFM** requires all projects in the solution to support that TFM. Not all projects target every framework (e.g., some are `net10.0`-only). Use `./dotnet/eng/scripts/New-FilteredSolution.ps1` to generate a filtered solution:
+
+```powershell
+# Generate a filtered solution for net472 and run tests
+$filtered = ./dotnet/eng/scripts/New-FilteredSolution.ps1 -Solution dotnet/agent-framework-dotnet.slnx -TargetFramework net472
+dotnet test --solution $filtered --no-build -f net472 --ignore-exit-code 8
+
+# Exclude samples and keep only unit test projects
+./dotnet/eng/scripts/New-FilteredSolution.ps1 -Solution dotnet/agent-framework-dotnet.slnx -TargetFramework net10.0 -ExcludeSamples -TestProjectNameFilter "*UnitTests*" -OutputPath dotnet/filtered-unit.slnx
+```
+
+```bash
+# Run tests via dotnet test (uses MTP under the hood)
+dotnet test --project ./tests/Microsoft.Agents.AI.UnitTests -f net10.0
+
+# Run tests with code coverage (Cobertura format)
+dotnet test --project ./tests/Microsoft.Agents.AI.UnitTests -f net10.0 --coverage --coverage-output-format cobertura --coverage-settings ./tests/coverage.runsettings
+
+# Run tests directly via dotnet run (MTP native command line)
+dotnet run --project ./tests/Microsoft.Agents.AI.UnitTests -f net10.0
+
+# Show MTP command line help
+dotnet run --project ./tests/Microsoft.Agents.AI.UnitTests -f net10.0 -- -?
 ```

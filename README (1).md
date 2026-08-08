@@ -1,17 +1,9 @@
-# Declarative Workflows
+# Durable Agents Have Moved
 
-A _Declarative Workflow_ is defined as a single YAML file and
-may be executed locally no different from any regular `Workflow` that is defined by code.
+Durable Task and Azure Functions integrations for Microsoft Agent Framework are now maintained in the [Durable Agent Framework extension repository](https://github.com/microsoft/agent-framework-durable-extension).
 
-The difference is that the workflow definition is loaded from a YAML file instead of being defined in code:
-
-```c#
-Workflow workflow = DeclarativeWorkflowBuilder.Build("Marketing.yaml", options);
-```
-
-These example workflows may be executed by the workflow
-[Samples](../../dotnet/samples/03-workflows/Declarative)
-that are present in this repository.
-
-> See the [README.md](../../dotnet/samples/03-workflows/Declarative/README.md) 
- associated with the samples for configuration details.
+- [.NET source](https://github.com/microsoft/agent-framework-durable-extension/tree/main/dotnet/src)
+- [.NET samples](https://github.com/microsoft/agent-framework-durable-extension/tree/main/dotnet/samples)
+- [Python source](https://github.com/microsoft/agent-framework-durable-extension/tree/main/python/packages)
+- [Python samples](https://github.com/microsoft/agent-framework-durable-extension/tree/main/python/samples)
+- [Durable agent documentation](https://github.com/microsoft/agent-framework-durable-extension/tree/main/docs/features/durable-agents)
