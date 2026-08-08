@@ -3,69 +3,95 @@
 using System;
 using System.Threading;
 using System.Threading.Tasks;
+using Microsoft.Agents.AI.Workflows.Declarative.Interpreter;
+using Microsoft.Agents.AI.Workflows.Declarative.Kit;
+using Microsoft.Agents.AI.Workflows.Declarative.PowerFx;
+using Microsoft.Agents.ObjectModel;
+using Microsoft.PowerFx.Types;
+using Microsoft.Shared.Diagnostics;
 
-namespace Microsoft.Agents.AI.Workflows;
+namespace Microsoft.Agents.AI.Workflows.Declarative.Extensions;
 
-/// <summary>
-/// Provides extension methods for working with <see cref="IWorkflowContext"/> instances.
-/// </summary>
-public static class IWorkflowContextExtensions
+internal static class IWorkflowContextExtensions
 {
-    /// <summary>
-    /// Invokes an asynchronous operation that reads, updates, and persists workflow state associated with the specified
-    /// key.
-    /// </summary>
-    /// <typeparam name="TState">The type of the state object to read, update, and persist.</typeparam>
-    /// <param name="context">The workflow context used to access and update state.</param>
-    /// <param name="invocation">A delegate that receives the current state, workflow context, and cancellation token, and returns the updated
-    /// state asynchronously.</param>
-    /// <param name="key">The key identifying the state to read and update. Cannot be null or empty.</param>
-    /// <param name="scopeName">An optional scope name that further qualifies the state key. If null, the default scope is used.</param>
-    /// <param name="cancellationToken">A cancellation token that can be used to cancel the asynchronous operation.</param>
-    /// <returns>A ValueTask that represents the asynchronous operation.</returns>
-    public static async ValueTask InvokeWithStateAsync<TState>(this IWorkflowContext context,
-                                                               Func<TState?, IWorkflowContext, CancellationToken, ValueTask<TState?>> invocation,
-                                                               string key,
-                                                               string? scopeName = null,
-                                                               CancellationToken cancellationToken = default)
+    public static ValueTask RaiseInvocationEventAsync(this IWorkflowContext context, DialogAction action, string? priorEventId = null, CancellationToken cancellationToken = default) =>
+        context.AddEventAsync(new DeclarativeActionInvokedEvent(action, priorEventId), cancellationToken);
+
+    public static ValueTask RaiseCompletionEventAsync(this IWorkflowContext context, DialogAction action, CancellationToken cancellationToken = default) =>
+        context.AddEventAsync(new DeclarativeActionCompletedEvent(action), cancellationToken);
+
+    public static FormulaValue ReadState(this IWorkflowContext context, PropertyPath variablePath) =>
+        context.ReadState(Throw.IfNull(variablePath.VariableName), Throw.IfNull(variablePath.NamespaceAlias));
+
+    public static FormulaValue ReadState(this IWorkflowContext context, string key, string? scopeName = null) =>
+        DeclarativeContext(context).State.Get(key, scopeName);
+
+    public static ValueTask SendResultMessageAsync(this IWorkflowContext context, string id, CancellationToken cancellationToken = default) =>
+        context.SendResultMessageAsync(id, result: null, cancellationToken);
+
+    public static ValueTask SendResultMessageAsync(this IWorkflowContext context, string id, object? result, CancellationToken cancellationToken = default) =>
+        context.SendMessageAsync(new ActionExecutorResult(id, result), targetId: null, cancellationToken);
+
+    public static ValueTask QueueStateResetAsync(this IWorkflowContext context, PropertyPath variablePath, CancellationToken cancellationToken = default) =>
+        context.QueueStateUpdateAsync(Throw.IfNull(variablePath.VariableName), UnassignedValue.Instance, Throw.IfNull(variablePath.NamespaceAlias), cancellationToken);
+
+    public static ValueTask QueueStateUpdateAsync<TValue>(this IWorkflowContext context, PropertyPath variablePath, TValue? value, CancellationToken cancellationToken = default) =>
+        context.QueueStateUpdateAsync(Throw.IfNull(variablePath.VariableName), value, Throw.IfNull(variablePath.NamespaceAlias), cancellationToken);
+
+    public static async ValueTask QueueEnvironmentUpdateAsync<TValue>(this IWorkflowContext context, string key, TValue? value, CancellationToken cancellationToken = default)
     {
-        TState? state = await context.ReadStateAsync<TState>(key, scopeName, cancellationToken).ConfigureAwait(false);
-        state = await invocation(state, context, cancellationToken).ConfigureAwait(false);
-        await context.QueueStateUpdateAsync(key, state, scopeName, cancellationToken).ConfigureAwait(false);
+        DeclarativeWorkflowContext declarativeContext = DeclarativeContext(context);
+        await declarativeContext.UpdateStateAsync(key, value, VariableScopeNames.Environment, allowSystem: true, cancellationToken).ConfigureAwait(false);
+        declarativeContext.State.Bind();
     }
 
-    /// <summary>
-    /// Invokes an asynchronous operation that reads, updates, and persists workflow state associated with the specified
-    /// key.
-    /// </summary>
-    /// <typeparam name="TState">The type of the state object to read, update, and persist.</typeparam>
-    /// <param name="context">The workflow context used to access and update state.</param>
-    /// <param name="invocation">A delegate that receives the current state, workflow context, and cancellation token, and returns the updated
-    /// state asynchronously.</param>
-    /// <param name="key">The key identifying the state to read and update. Cannot be null or empty.</param>
-    /// <param name="initialStateFactory">A factory to initialize state to if it is not set at the provided key.</param>
-    /// <param name="scopeName">An optional scope name that further qualifies the state key. If null, the default scope is used.</param>
-    /// <param name="cancellationToken">A cancellation token that can be used to cancel the asynchronous operation.</param>
-    /// <returns>A ValueTask that represents the asynchronous operation.</returns>
-    public static async ValueTask InvokeWithStateAsync<TState>(this IWorkflowContext context,
-                                                               Func<TState, IWorkflowContext, CancellationToken, ValueTask<TState?>> invocation,
-                                                               string key,
-                                                               Func<TState> initialStateFactory,
-                                                               string? scopeName = null,
-                                                               CancellationToken cancellationToken = default)
+    public static async ValueTask QueueSystemUpdateAsync<TValue>(this IWorkflowContext context, string key, TValue? value, CancellationToken cancellationToken = default)
     {
-        TState? state = await context.ReadOrInitStateAsync(key, initialStateFactory, scopeName, cancellationToken).ConfigureAwait(false);
-        state = await invocation(state, context, cancellationToken).ConfigureAwait(false);
-        await context.QueueStateUpdateAsync(key, state ?? initialStateFactory(), scopeName, cancellationToken).ConfigureAwait(false);
+        DeclarativeWorkflowContext declarativeContext = DeclarativeContext(context);
+        await declarativeContext.UpdateStateAsync(key, value, VariableScopeNames.System, allowSystem: true, cancellationToken).ConfigureAwait(false);
+        declarativeContext.State.Bind();
     }
 
-    /// <summary>
-    /// Queues a message to be sent to connected executors. The message will be sent during the next SuperStep.
-    /// </summary>
-    /// <param name="context">The workflow context used to access and update state.</param>
-    /// <param name="message">The message to be sent.</param>
-    /// <param name="cancellationToken">The <see cref="CancellationToken"/> to monitor for cancellation requests.</param>
-    /// <returns>A <see cref="ValueTask"/> representing the asynchronous operation.</returns>
-    public static ValueTask SendMessageAsync(this IWorkflowContext context, object message, CancellationToken cancellationToken = default) =>
-        context.SendMessageAsync(message, null, cancellationToken);
+    public static ValueTask QueueConversationUpdateAsync(this IWorkflowContext context, string conversationId, CancellationToken cancellationToken = default) =>
+        context.QueueConversationUpdateAsync(conversationId, isExternal: false, cancellationToken);
+
+    public static async ValueTask QueueConversationUpdateAsync(this IWorkflowContext context, string conversationId, bool isExternal = false, CancellationToken cancellationToken = default)
+    {
+        RecordValue conversation = (RecordValue)context.ReadState(SystemScope.Names.Conversation, VariableScopeNames.System);
+
+        if (isExternal)
+        {
+            conversation.UpdateField("Id", FormulaValue.New(conversationId));
+            await context.QueueSystemUpdateAsync(SystemScope.Names.Conversation, conversation, cancellationToken).ConfigureAwait(false);
+            await context.QueueSystemUpdateAsync(SystemScope.Names.ConversationId, FormulaValue.New(conversationId), cancellationToken).ConfigureAwait(false);
+        }
+
+        await context.AddEventAsync(new ConversationUpdateEvent(conversationId) { IsWorkflow = isExternal }, cancellationToken).ConfigureAwait(false);
+    }
+
+    public static string? GetWorkflowConversation(this IWorkflowContext context) =>
+        context.ReadState(SystemScope.Names.ConversationId, VariableScopeNames.System) switch
+        {
+            StringValue stringValue when stringValue.Value.Length > 0 => stringValue.Value,
+            _ => null,
+        };
+
+    public static bool IsWorkflowConversation(
+        this IWorkflowContext context,
+        string? conversationId,
+        out string? workflowConversationId)
+    {
+        workflowConversationId = context.GetWorkflowConversation();
+        return workflowConversationId?.Equals(conversationId, StringComparison.Ordinal) ?? false;
+    }
+
+    private static DeclarativeWorkflowContext DeclarativeContext(IWorkflowContext context)
+    {
+        if (context is not DeclarativeWorkflowContext declarativeContext)
+        {
+            throw new DeclarativeActionException($"Invalid workflow context: {context.GetType().Name}.");
+        }
+
+        return declarativeContext;
+    }
 }

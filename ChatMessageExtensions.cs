@@ -2,174 +2,327 @@
 
 using System;
 using System.Collections.Generic;
-using System.Diagnostics;
+using System.IO;
 using System.Linq;
-using System.Text;
-using System.Text.Json;
-using System.Text.RegularExpressions;
+using Microsoft.Agents.AI.Workflows.Declarative.PowerFx;
+using Microsoft.Agents.ObjectModel;
 using Microsoft.Extensions.AI;
+using Microsoft.PowerFx.Types;
 
-namespace Microsoft.Agents.AI.Workflows.Specialized.Magentic;
+namespace Microsoft.Agents.AI.Workflows.Declarative.Extensions;
 
-internal static partial class ChatMessageExtensions
+internal static class ChatMessageExtensions
 {
-    private static void ProcessAIContents(StringBuilder resultBuilder, IEnumerable<AIContent> contents, StreamingToolCallResultPairMatcher? pairMatcher = null)
+    public static RecordValue ToRecord(this ChatMessage message) =>
+        FormulaValue.NewRecordFromFields(message.GetMessageFields());
+
+    /// <summary>
+    /// Merges the user-authored <paramref name="input"/> with the round-tripped
+    /// <paramref name="inputMessage"/> returned by <c>AgentProvider.CreateMessageAsync</c>
+    /// to produce the value stored in <c>System.LastMessage</c>.
+    /// </summary>
+    /// <remarks>
+    /// The agent service often strips or alters <see cref="TextContent"/> on round-trip,
+    /// while replacing inline media (<see cref="DataContent"/>, <see cref="UriContent"/>)
+    /// with server-side references (typically <see cref="HostedFileContent"/>).
+    /// We want both: the original text (so <c>=System.LastMessage.Text</c> works) and
+    /// the server's media references (so subsequent actions don't re-upload large blobs).
+    /// <para>
+    /// Strategy: keep <paramref name="inputMessage"/> as the base — it has the server-generated
+    /// <see cref="ChatMessage.MessageId"/> and any provider-augmented metadata, and is forward-
+    /// compatible with new properties added on <see cref="ChatMessage"/> in the abstractions
+    /// layer. Only the <see cref="ChatMessage.Contents"/> list is mutated to substitute
+    /// original <see cref="TextContent"/> items in place (and append any extras the round-trip
+    /// dropped). Non-text content items returned by the service are left untouched so
+    /// server-side references survive.
+    /// </para>
+    /// </remarks>
+    public static ChatMessage MergeForLastMessage(this ChatMessage input, ChatMessage? inputMessage)
     {
-        pairMatcher ??= new();
-
-        foreach (AIContent content in contents)
+        if (inputMessage is null)
         {
-            switch (content)
+            return input;
+        }
+
+        // Build a queue of the original text items, in order. Fall back to ChatMessage.Text
+        // if the input has no explicit TextContent entries.
+        Queue<TextContent> originalTexts = new(input.Contents.OfType<TextContent>());
+        if (originalTexts.Count == 0 && !string.IsNullOrEmpty(input.Text))
+        {
+            originalTexts.Enqueue(new TextContent(input.Text));
+        }
+
+        // Replace TextContent items in inputMessage.Contents with the originals, in order.
+        for (int i = 0; i < inputMessage.Contents.Count && originalTexts.Count > 0; i++)
+        {
+            if (inputMessage.Contents[i] is TextContent)
             {
-                case TextContent textContent:
-                    resultBuilder.AppendLine(textContent.Text);
-                    break;
+                inputMessage.Contents[i] = originalTexts.Dequeue();
+            }
+        }
 
-                //case DataContent dataContent:
-                //    // We really do not know how to deal with anything other than image data with descriptions, which is not
-                //    // a well-defined concept in MEAI (as contrasted with AutoGen's ImageContent type)
-                //    break;
+        // Append any remaining original text items that the round-trip dropped entirely.
+        while (originalTexts.Count > 0)
+        {
+            inputMessage.Contents.Add(originalTexts.Dequeue());
+        }
 
-                case ErrorContent errorContent:
-                    resultBuilder.AppendLine($"[ERROR{(errorContent.ErrorCode != null ? $"(Code={errorContent.ErrorCode})" : string.Empty)}]");
-                    resultBuilder.AppendLine(errorContent.Message);
+        return inputMessage;
+    }
 
-                    if (errorContent.Details != null)
-                    {
-                        resultBuilder.Append("Details:").AppendLine(errorContent.Details);
-                    }
+    public static TableValue ToTable(this IEnumerable<ChatMessage> messages) =>
+        FormulaValue.NewTable(TypeSchema.Message.RecordType, messages.Select(message => message.ToRecord()));
 
-                    break;
+    public static IEnumerable<ChatMessage>? ToChatMessages(this DataValue? messages)
+    {
+        if (messages is null or BlankDataValue)
+        {
+            return null;
+        }
 
-                case FunctionCallContent functionCallContent:
-                    pairMatcher.CollectFunctionCall(functionCallContent);
-                    break;
+        if (messages is TableDataValue table)
+        {
+            return table.ToChatMessages();
+        }
 
-                case FunctionResultContent functionResultContent:
-                    pairMatcher.TryResolveFunctionCall(functionResultContent, out string? functionName);
-                    string result = functionResultContent.Result?.ToString() ?? string.Empty;
+        if (messages is RecordDataValue record)
+        {
+            return [record.ToChatMessage()];
+        }
 
-                    resultBuilder.AppendLine($"[Tool Call '{functionName ?? functionResultContent.CallId}' Result]")
-                                 .AppendLine(result);
+        if (messages is StringDataValue text)
+        {
+            return [text.ToChatMessage()];
+        }
 
-                    break;
+        return null;
+    }
 
-                case McpServerToolCallContent mstContent:
-                    pairMatcher.CollectMcpServerToolCall(mstContent);
-                    break;
-
-                case McpServerToolResultContent mstResultContent:
-                    if (mstResultContent.Outputs?.Any() is true)
-                    {
-                        pairMatcher.TryResolveMcpServerToolCall(mstResultContent, out string? mcpServerToolName);
-                        resultBuilder.AppendLine($"[Start MCP Server Tool Call '{mcpServerToolName ?? mstResultContent.CallId}' Results]");
-
-                        ProcessAIContents(resultBuilder, mstResultContent.Outputs!);
-
-                        resultBuilder.AppendLine($"[End MCP Server Tool Call '{mcpServerToolName ?? mstResultContent.CallId}']");
-                    }
-
-                    break;
-                case TextReasoningContent reasoningContent:
-                    if (!string.IsNullOrWhiteSpace(reasoningContent.Text))
-                    {
-                        resultBuilder.Append("[Reasoning] ")
-                                     .AppendLine(reasoningContent.Text);
-                    }
-
-                    break;
-
-                case UriContent uriContent:
-                    resultBuilder.AppendLine(uriContent.Uri.ToString());
-                    break;
+    public static IEnumerable<ChatMessage> ToChatMessages(this TableDataValue messages)
+    {
+        foreach (RecordDataValue record in messages.Values)
+        {
+            DataValue sourceRecord = record;
+            if (record.Properties.Count == 1 && record.Properties.TryGetValue("Value", out DataValue? singleColumn))
+            {
+                sourceRecord = singleColumn;
+            }
+            ChatMessage? convertedMessage = sourceRecord.ToChatMessage();
+            if (convertedMessage is not null)
+            {
+                yield return convertedMessage;
             }
         }
     }
 
-    public static string GetText(this List<ChatMessage> messages)
+    public static ChatMessage? ToChatMessage(this DataValue message)
     {
-        if (messages.Count == 0)
+        if (message is RecordDataValue record)
         {
-            return string.Empty;
+            return record.ToChatMessage();
         }
 
-        StringBuilder builder = new();
-        StreamingToolCallResultPairMatcher pairMatcher = new();
-        foreach (ChatMessage message in messages)
+        if (message is StringDataValue text)
         {
-            ProcessAIContents(builder, message.Contents, pairMatcher);
+            return text.ToChatMessage();
         }
 
-        return builder.ToString();
+        if (message is BlankDataValue)
+        {
+            return null;
+        }
+
+        throw new DeclarativeActionException($"Unable to convert {message.GetDataType()} to {nameof(ChatMessage)}.");
     }
 
-    private const string FencedJsonRegexPattern = @"```(?<lang>[a-z]+)?\s*(?<json>\{[\s\S]*?\})\s*```";
-#if NET
-    [GeneratedRegex(FencedJsonRegexPattern, RegexOptions.IgnoreCase | RegexOptions.CultureInvariant | RegexOptions.ExplicitCapture)]
-    public static partial Regex FencedJsonRegex();
-#else
-    public static Regex FencedJsonRegex() => s_fencedJsonRegex;
-    private static readonly Regex s_fencedJsonRegex =
-        new(FencedJsonRegexPattern, RegexOptions.Compiled | RegexOptions.CultureInvariant | RegexOptions.ExplicitCapture);
-#endif
+    public static ChatMessage ToChatMessage(this RecordDataValue message) =>
+        new(message.GetRole(), [.. message.GetContent()])
+        {
+            MessageId = message.GetProperty<StringDataValue>(TypeSchema.Message.Fields.Id)?.Value,
+            AdditionalProperties = message.GetProperty<RecordDataValue>(TypeSchema.Message.Fields.Metadata).ToMetadata()
+        };
 
-    internal static JsonElement ExtractJson(string messageText)
+    public static ChatMessage ToChatMessage(this StringDataValue message) => new(ChatRole.User, message.Value);
+
+    public static ChatMessage ToChatMessage(this IEnumerable<FunctionResultContent> functionResults) =>
+        new(ChatRole.Tool, [.. functionResults]);
+
+    public static AdditionalPropertiesDictionary? ToMetadata(this RecordDataValue? metadata)
     {
-        Match match = FencedJsonRegex().Match(messageText);
-        if (match.Success)
+        if (metadata is null)
         {
-            return JsonElement.Parse(match.Groups["json"].Value);
+            return null;
         }
 
-        int start = messageText.IndexOf('{'), scanHead = start;
-        int? end = null;
+        AdditionalPropertiesDictionary properties = [];
 
-        if (scanHead < 0)
+        foreach (KeyValuePair<string, DataValue> property in metadata.Properties)
         {
-            throw new InvalidOperationException("No JSON object found.");
+            properties[property.Key] = property.Value.ToObject();
         }
 
-        int depth = 0;
-        bool inQuotes = false, inEscape = false;
-        for (; scanHead < messageText.Length && end is null; scanHead++)
-        {
-            if (inEscape)
-            {
-                inEscape = false;
-                continue;
-            }
+        return properties;
+    }
 
-            switch (messageText[scanHead])
+    public static ChatRole ToChatRole(this AgentMessageRole role) =>
+        role switch
+        {
+            AgentMessageRole.Agent => ChatRole.Assistant,
+            AgentMessageRole.User => ChatRole.User,
+            _ => ChatRole.User
+        };
+
+    public static ChatRole ToChatRole(this AgentMessageRole? role) => role?.ToChatRole() ?? ChatRole.User;
+
+    public static AIContent? ToContent(this AgentMessageContentType contentType, string? contentValue, string? mediaType = null)
+    {
+        if (string.IsNullOrEmpty(contentValue))
+        {
+            return null;
+        }
+
+        return
+            contentType switch
             {
-                case '{' when !inQuotes:
-                    depth++;
-                    break;
-                case '}' when !inQuotes:
-                    depth--;
-                    if (depth == 0)
+                AgentMessageContentType.ImageUrl => GetImageContent(contentValue, mediaType ?? InferMediaType(contentValue)),
+                AgentMessageContentType.ImageFile => new HostedFileContent(contentValue),
+                _ => new TextContent(contentValue)
+            };
+    }
+
+    private static ChatRole GetRole(this RecordDataValue message)
+    {
+        StringDataValue? roleValue = message.GetProperty<StringDataValue>(TypeSchema.Message.Fields.Role);
+        if (string.IsNullOrWhiteSpace(roleValue?.Value))
+        {
+            return ChatRole.User;
+        }
+
+        AgentMessageRole? role = null;
+        if (Enum.TryParse(roleValue.Value, out AgentMessageRole parsedRole))
+        {
+            role = parsedRole;
+        }
+
+        return role.ToChatRole();
+    }
+
+    private static IEnumerable<AIContent> GetContent(this RecordDataValue message)
+    {
+        TableDataValue? content = message.GetProperty<TableDataValue>(TypeSchema.Message.Fields.Content);
+        if (content is not null)
+        {
+            foreach (RecordDataValue contentItem in content.Values)
+            {
+                StringDataValue? contentValue = contentItem.GetProperty<StringDataValue>(TypeSchema.MessageContent.Fields.Value);
+                StringDataValue? mediaTypeValue = contentItem.GetProperty<StringDataValue>(TypeSchema.MessageContent.Fields.MediaType);
+                if (contentValue is null || string.IsNullOrWhiteSpace(contentValue.Value))
+                {
+                    continue;
+                }
+
+                yield return
+                    contentItem.GetProperty<StringDataValue>(TypeSchema.MessageContent.Fields.Type)?.Value switch
                     {
-                        end = scanHead;
-                    }
+                        TypeSchema.MessageContent.ContentTypes.ImageUrl => GetImageContent(contentValue.Value, mediaTypeValue?.Value ?? InferMediaType(contentValue.Value)),
+                        TypeSchema.MessageContent.ContentTypes.ImageFile => new HostedFileContent(contentValue.Value),
+                        _ => new TextContent(contentValue.Value)
+                    };
+            }
+        }
+    }
 
-                    break;
-                case '\"':
-                    // We already handled inEscape, so we can always flip inQuotes here
-                    inQuotes = !inQuotes;
-                    break;
-                case '\\':
-                    Debug.Assert(!inEscape);
-                    inEscape = true;
-                    break;
+    private static string InferMediaType(string value)
+    {
+        // Base64 encoded content includes media type
+        if (value.StartsWith("data:", StringComparison.OrdinalIgnoreCase))
+        {
+            int semicolonIndex = value.IndexOf(';');
+            if (semicolonIndex > 5)
+            {
+                return value.Substring(5, semicolonIndex - 5);
             }
         }
 
-        if (end is null)
-        {
-            throw new InvalidOperationException("Unbalanced JSON braces.");
-        }
-
-        return JsonElement.Parse(messageText.Substring(start, end.Value - start + 1));
+        // URL based input only supports image
+        string fileExtension = Path.GetExtension(value);
+        return
+            fileExtension.ToUpperInvariant() switch
+            {
+                ".JPG" or ".JPEG" => "image/jpeg",
+                ".PNG" => "image/png",
+                ".GIF" => "image/gif",
+                ".WEBP" => "image/webp",
+                _ => "image/*"
+            };
     }
 
-    public static JsonElement ExtractJson(this ChatMessage message) => ExtractJson(message.Text);
+    private static AIContent GetImageContent(string uriText, string mediaType) =>
+        uriText.StartsWith("data:", StringComparison.OrdinalIgnoreCase) ?
+            new DataContent(uriText, mediaType) :
+            new UriContent(uriText, mediaType);
+
+    private static TValue? GetProperty<TValue>(this RecordDataValue record, string name)
+        where TValue : DataValue
+    {
+        if (record.Properties.TryGetValue(name, out DataValue? value) && value is TValue dataValue)
+        {
+            return dataValue;
+        }
+
+        return null;
+    }
+
+    private static IEnumerable<NamedValue> GetMessageFields(this ChatMessage message)
+    {
+        yield return new NamedValue(TypeSchema.Discriminator, nameof(ChatMessage).ToFormula());
+        yield return new NamedValue(TypeSchema.Message.Fields.Id, message.MessageId.ToFormula());
+        yield return new NamedValue(TypeSchema.Message.Fields.Role, message.Role.Value.ToFormula());
+        yield return new NamedValue(TypeSchema.Message.Fields.Author, message.AuthorName.ToFormula());
+        yield return new NamedValue(TypeSchema.Message.Fields.Content, FormulaValue.NewTable(TypeSchema.MessageContent.RecordType, message.GetContentRecords()));
+        yield return new NamedValue(TypeSchema.Message.Fields.Text, message.Text.ToFormula());
+        yield return new NamedValue(TypeSchema.Message.Fields.Metadata, message.AdditionalProperties.ToRecord());
+    }
+
+    private static IEnumerable<RecordValue> GetContentRecords(this ChatMessage message) =>
+        message.Contents.Select(content => FormulaValue.NewRecordFromFields(content.GetContentFields()));
+
+    private static IEnumerable<NamedValue> GetContentFields(this AIContent content)
+    {
+        return
+            content switch
+            {
+                UriContent uriContent => CreateContentRecord(TypeSchema.MessageContent.ContentTypes.ImageUrl, uriContent.Uri.ToString()),
+                HostedFileContent fileContent => CreateContentRecord(TypeSchema.MessageContent.ContentTypes.ImageFile, fileContent.FileId),
+                TextContent textContent => CreateContentRecord(TypeSchema.MessageContent.ContentTypes.Text, textContent.Text),
+                DataContent dataContent => CreateContentRecord(TypeSchema.MessageContent.ContentTypes.ImageUrl, dataContent.Uri),
+                _ => []
+            };
+
+        static IEnumerable<NamedValue> CreateContentRecord(string type, string value, string? mediaType = null)
+        {
+            yield return new NamedValue(TypeSchema.MessageContent.Fields.Type, type.ToFormula());
+            yield return new NamedValue(TypeSchema.MessageContent.Fields.Value, value.ToFormula());
+            if (mediaType is not null)
+            {
+                yield return new NamedValue(TypeSchema.MessageContent.Fields.MediaType, mediaType.ToFormula());
+            }
+        }
+    }
+
+    private static RecordValue ToRecord(this AdditionalPropertiesDictionary? value)
+    {
+        return FormulaValue.NewRecordFromFields(GetFields());
+
+        IEnumerable<NamedValue> GetFields()
+        {
+            if (value is not null)
+            {
+                foreach (string key in value.Keys)
+                {
+                    yield return new NamedValue(key, value[key].ToFormula());
+                }
+            }
+        }
+    }
 }
